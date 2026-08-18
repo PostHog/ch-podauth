@@ -132,6 +132,32 @@ func TestClickHouseLDAPBridge(t *testing.T) {
 	if err == nil {
 		t.Fatalf("disallowed user query succeeded unexpectedly: %s", deniedOut)
 	}
+
+	// Same bridge, same connection settings, same token: only the mapping table
+	// changes. This is what a SIGHUP reload does to a running process.
+	if err := authService.SetMappings([]auth.Mapping{{
+		Namespace:          "analytics",
+		ServiceAccountName: "ch-reader",
+		ClickHouseUsers:    []string{"reader", "writer"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	out, err = dockerOutput(context.Background(),
+		"exec", container,
+		"clickhouse-client",
+		"--host", "127.0.0.1",
+		"--port", fmt.Sprint(nativePort),
+		"--user", "writer",
+		"--password", rawToken,
+		"--query", "SELECT currentUser()",
+	)
+	if err != nil {
+		dumpClickHouseDiagnostics(t, container)
+		t.Fatalf("writer query failed after the mappings were reloaded: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(out) != "writer" {
+		t.Fatalf("currentUser() = %q, want writer", strings.TrimSpace(out))
+	}
 }
 
 func newOIDCTestValidator(t *testing.T, key testutil.RSAKey) (string, *token.OIDCValidator) {

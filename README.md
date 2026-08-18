@@ -51,6 +51,26 @@ Mappings can also be supplied as JSON:
 CH_PODAUTH_MAPPINGS='[{"namespace":"analytics","service_account":"clickhouse-reader","clickhouse_users":["reader"]}]'
 ```
 
+## Config Reload
+
+`SIGHUP` re-reads the config file and swaps in its `mappings` without restarting the process or dropping LDAP connections. Binds in flight see either the old table or the new one, never a partial one.
+
+```sh
+kill -HUP "$(pidof ch-podauth)"
+```
+
+Only `mappings` reload. Listener addresses, size and connection limits, timeouts, OIDC settings, and logging are read once at startup. A reload that sees any of those change still applies the mappings, and names the stale fields so the ignored edit does not pass unnoticed:
+
+```
+level=WARN msg="config changed in fields that only apply at startup; restart to pick them up" fields="[oidc.issuer]"
+```
+
+A reload that fails is a no-op. Unreadable file, invalid YAML, a config that fails validation, or mappings that fail to compile all leave the previously loaded mappings in effect and the process serving, because a config typo should not take ClickHouse authentication down. Failures are logged at `ERROR` and counted in `ch_podauth_config_reload_total{result="failure"}`.
+
+Sending the signal always succeeds from the sender's point of view, so confirm a reload landed by reading `ch_podauth_config_last_reload_timestamp_seconds` rather than by the exit status of `kill`.
+
+Note that `CH_PODAUTH_MAPPINGS` still overrides the file on reload, so editing the file does nothing while that variable is set.
+
 ## HTTP Endpoints
 
 The HTTP listener (`http.listen_addr`, default `127.0.0.1:8080`) serves two routes:
@@ -75,6 +95,9 @@ Exported metrics include:
 | `ch_podauth_jwks_refresh_total` | counter | JWKS refreshes by `result` (success/failure). |
 | `ch_podauth_jwks_last_success_timestamp_seconds` | gauge | Time of the last successful refresh. |
 | `ch_podauth_jwks_keys` | gauge | Usable keys currently cached. |
+| `ch_podauth_config_reload_total` | counter | SIGHUP reloads by `result` (success/failure). |
+| `ch_podauth_config_last_reload_timestamp_seconds` | gauge | Time of the last successful reload. |
+| `ch_podauth_mappings_loaded` | gauge | Namespace/service-account identities currently authorized. |
 
 Standard `go_*` and `process_*` runtime metrics are exported as well.
 

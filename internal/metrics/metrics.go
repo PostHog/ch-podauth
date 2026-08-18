@@ -27,6 +27,10 @@ type Metrics struct {
 	jwksLastSuccess prometheus.Gauge
 	jwksKeys        prometheus.Gauge
 
+	configReloads    *prometheus.CounterVec
+	configLastReload prometheus.Gauge
+	mappingsLoaded   prometheus.Gauge
+
 	activeConnections prometheus.Gauge
 	maxConnections    prometheus.Gauge
 }
@@ -79,6 +83,18 @@ func New() *Metrics {
 			Name: "ch_podauth_jwks_keys",
 			Help: "Number of usable keys currently cached from the JWKS.",
 		}),
+		configReloads: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ch_podauth_config_reload_total",
+			Help: "SIGHUP config reloads grouped by result.",
+		}, []string{"result"}),
+		configLastReload: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ch_podauth_config_last_reload_timestamp_seconds",
+			Help: "Unix timestamp of the last successful config reload.",
+		}),
+		mappingsLoaded: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ch_podauth_mappings_loaded",
+			Help: "Namespace/service-account identities currently authorized.",
+		}),
 		activeConnections: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ch_podauth_active_connections",
 			Help: "LDAP connections currently being served.",
@@ -101,6 +117,9 @@ func New() *Metrics {
 		m.jwksRefreshes,
 		m.jwksLastSuccess,
 		m.jwksKeys,
+		m.configReloads,
+		m.configLastReload,
+		m.mappingsLoaded,
 		m.activeConnections,
 		m.maxConnections,
 		collectors.NewGoCollector(),
@@ -148,6 +167,23 @@ func (m *Metrics) ObserveJWKSRefresh(success bool, keyCount int) {
 		return
 	}
 	m.jwksRefreshes.WithLabelValues("failure").Inc()
+}
+
+// ObserveConfigReload records the outcome of a SIGHUP reload. A failed reload
+// leaves the mapping gauge untouched, because the mappings loaded before it are
+// still the ones in effect.
+func (m *Metrics) ObserveConfigReload(success bool, mappingCount int) {
+	if success {
+		m.configReloads.WithLabelValues("success").Inc()
+		m.configLastReload.SetToCurrentTime()
+		m.mappingsLoaded.Set(float64(mappingCount))
+		return
+	}
+	m.configReloads.WithLabelValues("failure").Inc()
+}
+
+func (m *Metrics) SetLoadedMappings(n int) {
+	m.mappingsLoaded.Set(float64(n))
 }
 
 func (m *Metrics) IncActiveConnections() {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -90,11 +91,18 @@ func Default() Config {
 	}
 }
 
+// ResolvePath applies the CH_PODAUTH_CONFIG fallback. Callers that reload later
+// resolve once at startup so they keep reading the file the process booted from.
+func ResolvePath(path string) string {
+	if path == "" {
+		return os.Getenv("CH_PODAUTH_CONFIG")
+	}
+	return path
+}
+
 func Load(path string) (Config, error) {
 	cfg := Default()
-	if path == "" {
-		path = os.Getenv("CH_PODAUTH_CONFIG")
-	}
+	path = ResolvePath(path)
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -158,6 +166,47 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// startupOnlyFields lists every setting that is read once while the process is
+// starting, keyed by the name an operator would edit. A reload replaces the
+// mappings and nothing else, so an edit to any of these does nothing until a
+// restart; NonReloadableDiff turns that into a log line instead of a surprise.
+func startupOnlyFields(c Config) map[string]any {
+	return map[string]any{
+		"ldap.listen_addr":          c.LDAP.ListenAddr,
+		"ldap.max_request_bytes":    c.LDAP.MaxRequestBytes,
+		"ldap.max_credential_bytes": c.LDAP.MaxCredentialBytes,
+		"ldap.max_connections":      c.LDAP.MaxConnections,
+		"ldap.read_timeout":         c.LDAP.ReadTimeout,
+		"ldap.write_timeout":        c.LDAP.WriteTimeout,
+		"http.listen_addr":          c.HTTP.ListenAddr,
+		"http.timeout":              c.HTTP.Timeout,
+		"oidc.issuer":               c.OIDC.Issuer,
+		"oidc.audience":             c.OIDC.Audience,
+		"oidc.clock_skew":           c.OIDC.ClockSkew,
+		"oidc.jwks_ttl":             c.OIDC.JWKSTTL,
+		"oidc.http_timeout":         c.OIDC.HTTPTimeout,
+		"oidc.max_jwks_bytes":       c.OIDC.MaxJWKSBytes,
+		"oidc.min_refresh_interval": c.OIDC.MinRefreshInterval,
+		"logging.level":             c.Logging.Level,
+		"logging.format":            c.Logging.Format,
+	}
+}
+
+// NonReloadableDiff names the startup-only settings that differ between the
+// running config and one just read from disk, sorted for stable logging.
+func NonReloadableDiff(running, next Config) []string {
+	before := startupOnlyFields(running)
+	after := startupOnlyFields(next)
+	changed := make([]string, 0, len(before))
+	for name, value := range before {
+		if after[name] != value {
+			changed = append(changed, name)
+		}
+	}
+	sort.Strings(changed)
+	return changed
 }
 
 func (c Config) AuthMappings() []auth.Mapping {
