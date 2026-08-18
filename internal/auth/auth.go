@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/rorylshanks/ch-podauth/internal/metrics"
 	"github.com/rorylshanks/ch-podauth/internal/token"
@@ -26,9 +27,12 @@ type Decision struct {
 	Identity    token.Identity
 }
 
+// mappingSet indexes the allowed ClickHouse usernames by "namespace/serviceAccount".
+type mappingSet map[string]map[string]struct{}
+
 type Service struct {
 	validator token.Validator
-	mappings  map[string]map[string]struct{}
+	mappings  atomic.Pointer[mappingSet]
 	logger    *slog.Logger
 	metrics   *metrics.Metrics
 }
@@ -40,7 +44,35 @@ func NewService(validator token.Validator, mappings []Mapping, logger *slog.Logg
 	if logger == nil {
 		logger = slog.Default()
 	}
-	compiled := make(map[string]map[string]struct{})
+	compiled, err := compileMappings(mappings)
+	if err != nil {
+		return nil, err
+	}
+	service := &Service{
+		validator: validator,
+		logger:    logger,
+		metrics:   metrics,
+	}
+	service.mappings.Store(&compiled)
+	return service, nil
+}
+
+// SetMappings replaces the authorization table on a running service. The new
+// mappings are compiled and checked before the swap, so a bad config leaves the
+// previous table serving rather than dropping authorization to nothing.
+//
+// Binds in flight either see the whole old table or the whole new one.
+func (s *Service) SetMappings(mappings []Mapping) error {
+	compiled, err := compileMappings(mappings)
+	if err != nil {
+		return err
+	}
+	s.mappings.Store(&compiled)
+	return nil
+}
+
+func compileMappings(mappings []Mapping) (mappingSet, error) {
+	compiled := make(mappingSet)
 	for _, mapping := range mappings {
 		if mapping.Namespace == "" || mapping.ServiceAccountName == "" || len(mapping.ClickHouseUsers) == 0 {
 			return nil, errors.New("mappings require namespace, service account, and at least one ClickHouse user")
@@ -63,12 +95,7 @@ func NewService(validator token.Validator, mappings []Mapping, logger *slog.Logg
 	if len(compiled) == 0 {
 		return nil, errors.New("at least one mapping is required")
 	}
-	return &Service{
-		validator: validator,
-		mappings:  compiled,
-		logger:    logger,
-		metrics:   metrics,
-	}, nil
+	return compiled, nil
 }
 
 func (s *Service) Authenticate(ctx context.Context, clickhouseUser, password string) Decision {
@@ -118,7 +145,7 @@ func (s *Service) Authenticate(ctx context.Context, clickhouseUser, password str
 }
 
 func (s *Service) Allowed(id token.Identity, clickhouseUser string) bool {
-	users, ok := s.mappings[identityKey(id.Namespace, id.ServiceAccountName)]
+	users, ok := (*s.mappings.Load())[identityKey(id.Namespace, id.ServiceAccountName)]
 	if !ok {
 		return false
 	}
@@ -126,9 +153,16 @@ func (s *Service) Allowed(id token.Identity, clickhouseUser string) bool {
 	return ok
 }
 
+// MappingCount reports how many namespace/service-account identities are
+// currently authorized.
+func (s *Service) MappingCount() int {
+	return len(*s.mappings.Load())
+}
+
 func (s *Service) Mappings() []Mapping {
-	result := make([]Mapping, 0, len(s.mappings))
-	for key, users := range s.mappings {
+	loaded := *s.mappings.Load()
+	result := make([]Mapping, 0, len(loaded))
+	for key, users := range loaded {
 		parts := strings.SplitN(key, "/", 2)
 		chUsers := make([]string, 0, len(users))
 		for user := range users {

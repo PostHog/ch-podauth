@@ -16,6 +16,8 @@ func TestHandlerExposesMetrics(t *testing.T) {
 	m.ObserveRequestTooLarge()
 	m.ObserveJWKSRefresh(true, 3)
 	m.ObserveJWKSRefresh(false, 0)
+	m.ObserveConfigReload(true, 7)
+	m.ObserveConfigReload(false, 0)
 	m.IncActiveConnections()
 	m.SetMaxConnections(256)
 
@@ -40,6 +42,10 @@ func TestHandlerExposesMetrics(t *testing.T) {
 		`ch_podauth_jwks_refresh_total{result="success"} 1`,
 		`ch_podauth_jwks_refresh_total{result="failure"} 1`,
 		"ch_podauth_jwks_keys 3",
+		`ch_podauth_config_reload_total{result="success"} 1`,
+		`ch_podauth_config_reload_total{result="failure"} 1`,
+		// A failed reload leaves the previous mapping count in place.
+		"ch_podauth_mappings_loaded 7",
 		"ch_podauth_active_connections 1",
 		"ch_podauth_max_connections 256",
 		// Go runtime / process collectors registered by New().

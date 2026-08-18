@@ -32,6 +32,7 @@ func run() error {
 	flag.StringVar(&configPath, "config", "", "path to config file")
 	flag.Parse()
 
+	configPath = config.ResolvePath(configPath)
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -73,6 +74,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	metricSet.SetLoadedMappings(authService.MappingCount())
+
+	hup, stopReloadSignal := installReloadSignal()
+	defer stopReloadSignal()
+	go watchReloadSignals(ctx, hup, configPath, cfg, authService, metricSet, logger)
+
 	ldapServer, err := ldapserver.New(ldapserver.Config{
 		ListenAddr:         cfg.LDAP.ListenAddr,
 		MaxRequestBytes:    cfg.LDAP.MaxRequestBytes,
@@ -118,6 +125,57 @@ func run() error {
 		}
 		return nil
 	}
+}
+
+// installReloadSignal registers the SIGHUP handler and returns the channel it
+// delivers to. It has to run synchronously during startup: until Notify is
+// called, the default disposition for SIGHUP terminates the process.
+func installReloadSignal() (chan os.Signal, func()) {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	return hup, func() { signal.Stop(hup) }
+}
+
+// watchReloadSignals re-reads the config file on every SIGHUP and swaps in its
+// mappings. Only the mappings are reloadable; everything else is baked into the
+// listeners and the token validator at startup.
+func watchReloadSignals(ctx context.Context, hup <-chan os.Signal, path string, startup config.Config, authService *auth.Service, metricSet *metrics.Metrics, logger *slog.Logger) {
+	running := startup
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+			if next, err := reloadMappings(path, running, authService, metricSet, logger); err == nil {
+				running = next
+			}
+		}
+	}
+}
+
+// reloadMappings returns the config now in effect. A reload that fails for any
+// reason is a no-op: the bridge keeps authorizing against the mappings it
+// already holds rather than exiting, because a config typo should not take
+// authentication down across the fleet.
+func reloadMappings(path string, running config.Config, authService *auth.Service, metricSet *metrics.Metrics, logger *slog.Logger) (config.Config, error) {
+	cfg, err := config.Load(path)
+	if err == nil {
+		err = authService.SetMappings(cfg.AuthMappings())
+	}
+	if err != nil {
+		metricSet.ObserveConfigReload(false, 0)
+		logger.Error("config reload failed, keeping previous mappings", "error", err)
+		return config.Config{}, err
+	}
+
+	if changed := config.NonReloadableDiff(running, cfg); len(changed) > 0 {
+		logger.Warn("config changed in fields that only apply at startup; restart to pick them up",
+			"fields", changed,
+		)
+	}
+	metricSet.ObserveConfigReload(true, authService.MappingCount())
+	logger.Info("config reloaded", "mappings", authService.MappingCount())
+	return cfg, nil
 }
 
 func refreshJWKSPeriodically(ctx context.Context, validator *token.OIDCValidator, ttl time.Duration, logger *slog.Logger) {
