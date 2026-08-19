@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -130,6 +131,47 @@ func TestSIGHUPTriggersReload(t *testing.T) {
 	for !authService.Allowed(testIdentity, "writer") {
 		if time.Now().After(deadline) {
 			t.Fatal("mappings were not reloaded within 5s of SIGHUP")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Reverting a startup-only edit has to clear the pending count. Comparing each
+// reload against the previous one instead of against startup leaves the gauge
+// raised forever, so an operator who fixes a bad issuer sees an alert that only
+// a pointless restart can clear. Observed on a live node before this was fixed.
+func TestReloadedStartupFieldStopsPendingOnceReverted(t *testing.T) {
+	path := writeConfig(t, "reader")
+	cfg, authService := startFromConfig(t, path)
+	m := metrics.New()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hup, stopReloadSignal := installReloadSignal()
+	defer stopReloadSignal()
+	go watchReloadSignals(ctx, hup, path, cfg, authService, m, discardLogger())
+
+	writeConfigWithIssuer(t, path, "https://rotated.example", "reader")
+	awaitPending(t, m, 1, "issuer drift was not reported as pending")
+
+	writeConfigWithIssuer(t, path, "https://issuer.example", "reader")
+	awaitPending(t, m, 0, "reverting the issuer did not clear the pending count")
+}
+
+func awaitPending(t *testing.T, m *metrics.Metrics, want int, msg string) {
+	t.Helper()
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	target := fmt.Sprintf("ch_podauth_config_startup_only_pending %d", want)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		body := metricsBody(t, m)
+		if strings.Contains(body, target) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: never saw %q\n---\n%s", msg, target, body)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

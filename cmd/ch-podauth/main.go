@@ -139,25 +139,28 @@ func installReloadSignal() (chan os.Signal, func()) {
 // watchReloadSignals re-reads the config file on every SIGHUP and swaps in its
 // mappings. Only the mappings are reloadable; everything else is baked into the
 // listeners and the token validator at startup.
+//
+// Every reload compares against the startup config rather than against whatever
+// the previous reload read. Those settings are still the ones being enforced, so
+// comparing against the last file read would report a startup-only edit as stale
+// forever, including after it was reverted to the value already in effect.
 func watchReloadSignals(ctx context.Context, hup <-chan os.Signal, path string, startup config.Config, authService *auth.Service, metricSet *metrics.Metrics, logger *slog.Logger) {
-	running := startup
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-hup:
-			if next, err := reloadMappings(path, running, authService, metricSet, logger); err == nil {
-				running = next
-			}
+			_, _ = reloadMappings(path, startup, authService, metricSet, logger)
 		}
 	}
 }
 
-// reloadMappings returns the config now in effect. A reload that fails for any
-// reason is a no-op: the bridge keeps authorizing against the mappings it
-// already holds rather than exiting, because a config typo should not take
-// authentication down across the fleet.
-func reloadMappings(path string, running config.Config, authService *auth.Service, metricSet *metrics.Metrics, logger *slog.Logger) (config.Config, error) {
+// reloadMappings applies the mappings from the config on disk and reports how
+// far it diverges from startup. A reload that fails for any reason is a no-op:
+// the bridge keeps authorizing against the mappings it already holds rather than
+// exiting, because a config typo should not take authentication down across the
+// fleet.
+func reloadMappings(path string, startup config.Config, authService *auth.Service, metricSet *metrics.Metrics, logger *slog.Logger) (config.Config, error) {
 	cfg, err := config.Load(path)
 	if err == nil {
 		err = authService.SetMappings(cfg.AuthMappings())
@@ -168,7 +171,7 @@ func reloadMappings(path string, running config.Config, authService *auth.Servic
 		return config.Config{}, err
 	}
 
-	changed := config.NonReloadableDiff(running, cfg)
+	changed := config.NonReloadableDiff(startup, cfg)
 	if len(changed) > 0 {
 		logger.Warn("config changed in fields that only apply at startup; restart to pick them up",
 			"fields", changed,
