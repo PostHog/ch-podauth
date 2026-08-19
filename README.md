@@ -65,7 +65,9 @@ Only `mappings` reload. Listener addresses, size and connection limits, timeouts
 level=WARN msg="config changed in fields that only apply at startup; restart to pick them up" fields="[oidc.issuer]"
 ```
 
-That case is counted as `ch_podauth_config_reload_total{result="partial"}` rather than `success`, and it raises `ch_podauth_config_startup_only_pending` to the number of stale settings. The gauge stays up until the process restarts, so it is the signal to alert on: a non-zero value means the running process is enforcing a config that is no longer the one on disk. `oidc.issuer` and `oidc.audience` are in that set, so this is a trust-boundary concern and not only a tidiness one.
+That case is counted as `ch_podauth_config_reload_total{result="partial"}` rather than `success`, and it raises `ch_podauth_config_startup_only_pending` to the number of stale settings. That gauge is the signal to alert on: a non-zero value means the process is enforcing a config that is no longer the one on disk. `oidc.issuer` and `oidc.audience` are in that set, so this is a trust-boundary concern and not only a tidiness one.
+
+Every reload compares against the config the process started with, not against whatever the previous reload read. Reverting a startup-only edit therefore clears the gauge on the next reload, because the value in the file is the one already in effect. Restarting clears it too, but is not required.
 
 A reload that fails is a no-op. Unreadable file, invalid YAML, a config that fails validation, or mappings that fail to compile all leave the previously loaded mappings in effect and the process serving, because a config typo should not take ClickHouse authentication down. Failures are logged at `ERROR` and counted in `ch_podauth_config_reload_total{result="failure"}`.
 
@@ -99,7 +101,7 @@ Exported metrics include:
 | `ch_podauth_jwks_keys` | gauge | Usable keys currently cached. |
 | `ch_podauth_config_reload_total` | counter | SIGHUP reloads by `result` (success/partial/failure). |
 | `ch_podauth_config_last_reload_timestamp_seconds` | gauge | Time of the last reload that applied new mappings. |
-| `ch_podauth_config_startup_only_pending` | gauge | Startup-only settings that differ from the config on disk. Non-zero until restart. |
+| `ch_podauth_config_startup_only_pending` | gauge | Startup-only settings on disk that differ from the ones being enforced. Clears on restart or on revert. |
 | `ch_podauth_mappings_loaded` | gauge | Namespace/service-account identities currently authorized. |
 
 Standard `go_*` and `process_*` runtime metrics are exported as well.

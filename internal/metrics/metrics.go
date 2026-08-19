@@ -94,7 +94,7 @@ func New() *Metrics {
 		}),
 		configStartupOnlyPending: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ch_podauth_config_startup_only_pending",
-			Help: "Startup-only settings that differ between the running process and the config on disk. Stays non-zero until the service is restarted.",
+			Help: "Startup-only settings whose value on disk differs from the one the process started with and is still enforcing. Clears on restart, or on reverting the edit.",
 		}),
 		mappingsLoaded: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ch_podauth_mappings_loaded",
