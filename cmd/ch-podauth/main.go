@@ -163,17 +163,18 @@ func reloadMappings(path string, running config.Config, authService *auth.Servic
 		err = authService.SetMappings(cfg.AuthMappings())
 	}
 	if err != nil {
-		metricSet.ObserveConfigReload(false, 0)
+		metricSet.ObserveConfigReloadFailure()
 		logger.Error("config reload failed, keeping previous mappings", "error", err)
 		return config.Config{}, err
 	}
 
-	if changed := config.NonReloadableDiff(running, cfg); len(changed) > 0 {
+	changed := config.NonReloadableDiff(running, cfg)
+	if len(changed) > 0 {
 		logger.Warn("config changed in fields that only apply at startup; restart to pick them up",
 			"fields", changed,
 		)
 	}
-	metricSet.ObserveConfigReload(true, authService.MappingCount())
+	metricSet.ObserveConfigReloadSuccess(authService.MappingCount(), len(changed))
 	logger.Info("config reloaded", "mappings", authService.MappingCount())
 	return cfg, nil
 }

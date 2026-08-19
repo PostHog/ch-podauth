@@ -6,8 +6,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -59,6 +61,51 @@ func TestReloadMappingsKeepsRunningMappingsOnBadConfig(t *testing.T) {
 		if !authService.Allowed(testIdentity, "reader") {
 			t.Fatalf("reader lost authorization after a failed reload (%s)", name)
 		}
+	}
+}
+
+func TestReloadMappingsRecordsCleanReload(t *testing.T) {
+	path := writeConfig(t, "reader")
+	cfg, authService := startFromConfig(t, path)
+	m := metrics.New()
+
+	writeConfigAt(t, path, "writer")
+	if _, err := reloadMappings(path, cfg, authService, m, discardLogger()); err != nil {
+		t.Fatalf("reloadMappings() = %v", err)
+	}
+
+	body := metricsBody(t, m)
+	if !strings.Contains(body, `ch_podauth_config_reload_total{result="success"} 1`) {
+		t.Errorf("mapping-only reload not counted as a success\n---\n%s", body)
+	}
+	if !strings.Contains(body, "ch_podauth_config_startup_only_pending 0") {
+		t.Errorf("mapping-only reload reported settings as pending\n---\n%s", body)
+	}
+}
+
+// The issuer is the case that matters. A reload cannot apply it, so the bridge
+// keeps trusting the old one until a restart, and operators read these metrics
+// to decide whether a config change landed. Reporting this as a clean reload
+// would hide a change to the trust boundary.
+func TestReloadMappingsFlagsStaleIssuer(t *testing.T) {
+	path := writeConfig(t, "reader")
+	cfg, authService := startFromConfig(t, path)
+	m := metrics.New()
+
+	writeConfigWithIssuer(t, path, "https://rotated.example", "reader")
+	if _, err := reloadMappings(path, cfg, authService, m, discardLogger()); err != nil {
+		t.Fatalf("reloadMappings() = %v", err)
+	}
+
+	body := metricsBody(t, m)
+	if !strings.Contains(body, `ch_podauth_config_reload_total{result="partial"} 1`) {
+		t.Errorf("issuer change not counted as a partial reload\n---\n%s", body)
+	}
+	if strings.Contains(body, `ch_podauth_config_reload_total{result="success"}`) {
+		t.Errorf("issuer change also counted as a success\n---\n%s", body)
+	}
+	if !strings.Contains(body, "ch_podauth_config_startup_only_pending 1") {
+		t.Errorf("stale issuer not reported as pending\n---\n%s", body)
 	}
 }
 
@@ -118,8 +165,13 @@ func writeConfig(t *testing.T, clickhouseUser string) string {
 
 func writeConfigAt(t *testing.T, path, clickhouseUser string) {
 	t.Helper()
+	writeConfigWithIssuer(t, path, "https://issuer.example", clickhouseUser)
+}
+
+func writeConfigWithIssuer(t *testing.T, path, issuer, clickhouseUser string) {
+	t.Helper()
 	content := `oidc:
-  issuer: "https://issuer.example"
+  issuer: "` + issuer + `"
   audience: "clickhouse-auth"
 mappings:
   - namespace: "analytics"
@@ -134,6 +186,13 @@ mappings:
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func metricsBody(t *testing.T, m *metrics.Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	return rec.Body.String()
 }
 
 type stubValidator struct{}
