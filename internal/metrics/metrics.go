@@ -27,9 +27,10 @@ type Metrics struct {
 	jwksLastSuccess prometheus.Gauge
 	jwksKeys        prometheus.Gauge
 
-	configReloads    *prometheus.CounterVec
-	configLastReload prometheus.Gauge
-	mappingsLoaded   prometheus.Gauge
+	configReloads            *prometheus.CounterVec
+	configLastReload         prometheus.Gauge
+	configStartupOnlyPending prometheus.Gauge
+	mappingsLoaded           prometheus.Gauge
 
 	activeConnections prometheus.Gauge
 	maxConnections    prometheus.Gauge
@@ -85,11 +86,15 @@ func New() *Metrics {
 		}),
 		configReloads: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ch_podauth_config_reload_total",
-			Help: "SIGHUP config reloads grouped by result.",
+			Help: "SIGHUP config reloads grouped by result (success/partial/failure).",
 		}, []string{"result"}),
 		configLastReload: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ch_podauth_config_last_reload_timestamp_seconds",
-			Help: "Unix timestamp of the last successful config reload.",
+			Help: "Unix timestamp of the last reload that applied new mappings.",
+		}),
+		configStartupOnlyPending: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ch_podauth_config_startup_only_pending",
+			Help: "Startup-only settings that differ between the running process and the config on disk. Stays non-zero until the service is restarted.",
 		}),
 		mappingsLoaded: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ch_podauth_mappings_loaded",
@@ -119,6 +124,7 @@ func New() *Metrics {
 		m.jwksKeys,
 		m.configReloads,
 		m.configLastReload,
+		m.configStartupOnlyPending,
 		m.mappingsLoaded,
 		m.activeConnections,
 		m.maxConnections,
@@ -169,16 +175,26 @@ func (m *Metrics) ObserveJWKSRefresh(success bool, keyCount int) {
 	m.jwksRefreshes.WithLabelValues("failure").Inc()
 }
 
-// ObserveConfigReload records the outcome of a SIGHUP reload. A failed reload
-// leaves the mapping gauge untouched, because the mappings loaded before it are
-// still the ones in effect.
-func (m *Metrics) ObserveConfigReload(success bool, mappingCount int) {
-	if success {
-		m.configReloads.WithLabelValues("success").Inc()
-		m.configLastReload.SetToCurrentTime()
-		m.mappingsLoaded.Set(float64(mappingCount))
-		return
+// ObserveConfigReloadSuccess records a reload that swapped in new mappings.
+// startupOnlyChanged counts the settings the reload could not apply; a reload
+// that leaves any of them stale is recorded as "partial" rather than "success",
+// because the process is then serving a config that differs from the one on
+// disk and only a restart closes that gap.
+func (m *Metrics) ObserveConfigReloadSuccess(mappingCount, startupOnlyChanged int) {
+	result := "success"
+	if startupOnlyChanged > 0 {
+		result = "partial"
 	}
+	m.configReloads.WithLabelValues(result).Inc()
+	m.configLastReload.SetToCurrentTime()
+	m.mappingsLoaded.Set(float64(mappingCount))
+	m.configStartupOnlyPending.Set(float64(startupOnlyChanged))
+}
+
+// ObserveConfigReloadFailure records a reload that was rejected. It leaves the
+// mapping and pending gauges untouched, because the config loaded before it is
+// still the one in effect.
+func (m *Metrics) ObserveConfigReloadFailure() {
 	m.configReloads.WithLabelValues("failure").Inc()
 }
 
